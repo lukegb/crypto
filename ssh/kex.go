@@ -100,6 +100,24 @@ func (group *dhGroup) diffieHellman(theirPublic, myPrivate *big.Int) (*big.Int, 
 	return new(big.Int).Exp(theirPublic, myPrivate, group.p), nil
 }
 
+type unbufferedOfTypePacketReader interface {
+	readPacketUnbufferedOfType(byte) ([]byte, error)
+}
+
+func readPacketUnbufferedOfType(c packetConn, typ byte) ([]byte, error) {
+	if c, ok := c.(unbufferedOfTypePacketReader); ok {
+		return c.readPacketUnbufferedOfType(typ)
+	}
+	ps, err := c.readPacket()
+	if err != nil {
+		return nil, err
+	}
+	if ps[0] != typ {
+		return nil, fmt.Errorf("unexpected packet of type %d; wanted %d", ps[0], typ)
+	}
+	return ps, nil
+}
+
 func (group *dhGroup) Client(c packetConn, randSource io.Reader, magics *handshakeMagics) (*kexResult, error) {
 	var x *big.Int
 	for {
@@ -120,7 +138,7 @@ func (group *dhGroup) Client(c packetConn, randSource io.Reader, magics *handsha
 		return nil, err
 	}
 
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexDHReply)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +172,7 @@ func (group *dhGroup) Client(c packetConn, randSource io.Reader, magics *handsha
 }
 
 func (group *dhGroup) Server(c packetConn, randSource io.Reader, magics *handshakeMagics, priv AlgorithmSigner, algo string) (result *kexResult, err error) {
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexDHInit)
 	if err != nil {
 		return
 	}
@@ -238,7 +256,7 @@ func (kex *ecdh) Client(c packetConn, rand io.Reader, magics *handshakeMagics) (
 		return nil, err
 	}
 
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexECDHReply)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +335,7 @@ func validateECPublicKey(curve elliptic.Curve, x, y *big.Int) bool {
 }
 
 func (kex *ecdh) Server(c packetConn, rand io.Reader, magics *handshakeMagics, priv AlgorithmSigner, algo string) (result *kexResult, err error) {
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexECDHInit)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +500,7 @@ func (kex *curve25519sha256) Client(c packetConn, rand io.Reader, magics *handsh
 		return nil, err
 	}
 
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexECDHReply)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +541,7 @@ func (kex *curve25519sha256) Client(c packetConn, rand io.Reader, magics *handsh
 }
 
 func (kex *curve25519sha256) Server(c packetConn, rand io.Reader, magics *handshakeMagics, priv AlgorithmSigner, algo string) (result *kexResult, err error) {
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexECDHInit)
 	if err != nil {
 		return
 	}
@@ -610,7 +628,7 @@ func (gex *dhGEXSHA) Client(c packetConn, randSource io.Reader, magics *handshak
 	}
 
 	// Receive GexGroup
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexDHGexGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -646,7 +664,7 @@ func (gex *dhGEXSHA) Client(c packetConn, randSource io.Reader, magics *handshak
 	}
 
 	// Receive GexReply
-	packet, err = c.readPacket()
+	packet, err = readPacketUnbufferedOfType(c, msgKexDHGexReply)
 	if err != nil {
 		return nil, err
 	}
@@ -694,7 +712,7 @@ func (gex *dhGEXSHA) Client(c packetConn, randSource io.Reader, magics *handshak
 // This is a minimal implementation to satisfy the automated tests.
 func (gex dhGEXSHA) Server(c packetConn, randSource io.Reader, magics *handshakeMagics, priv AlgorithmSigner, algo string) (result *kexResult, err error) {
 	// Receive GexRequest
-	packet, err := c.readPacket()
+	packet, err := readPacketUnbufferedOfType(c, msgKexDHGexRequest)
 	if err != nil {
 		return
 	}
@@ -718,7 +736,7 @@ func (gex dhGEXSHA) Server(c packetConn, randSource io.Reader, magics *handshake
 	}
 
 	// Receive GexInit
-	packet, err = c.readPacket()
+	packet, err = readPacketUnbufferedOfType(c, msgKexDHGexInit)
 	if err != nil {
 		return
 	}

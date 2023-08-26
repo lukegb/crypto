@@ -55,8 +55,10 @@ type handshakeTransport struct {
 	hostKeyAlgorithms []string
 
 	// On read error, incoming is closed, and readError is set.
-	incoming  chan []byte
-	readError error
+	incoming                chan []byte
+	readError               error
+	pendingReadPackets      chan []byte // Used when a key exchange is in progress.
+	pendingReadPacketsInput chan []byte // Used when a key exchange is in progress.
 
 	mu               sync.Mutex
 	writeError       error
@@ -104,22 +106,50 @@ type pendingKex struct {
 
 func newHandshakeTransport(conn keyingTransport, config *Config, clientVersion, serverVersion []byte) *handshakeTransport {
 	t := &handshakeTransport{
-		conn:          conn,
-		serverVersion: serverVersion,
-		clientVersion: clientVersion,
-		incoming:      make(chan []byte, chanSize),
-		requestKex:    make(chan struct{}, 1),
-		startKex:      make(chan *pendingKex),
-		kexLoopDone:   make(chan struct{}),
+		conn:                    conn,
+		serverVersion:           serverVersion,
+		clientVersion:           clientVersion,
+		incoming:                make(chan []byte, chanSize),
+		pendingReadPackets:      make(chan []byte, chanSize),
+		pendingReadPacketsInput: make(chan []byte, chanSize),
+		requestKex:              make(chan struct{}, 1),
+		startKex:                make(chan *pendingKex),
+		kexLoopDone:             make(chan struct{}),
 
 		config: config,
 	}
+	go t.readPacketsBuffer()
 	t.resetReadThresholds()
 	t.resetWriteThresholds()
 
 	// We always start with a mandatory key exchange.
 	t.requestKex <- struct{}{}
 	return t
+}
+
+func (t *handshakeTransport) readPacketsBuffer() {
+	defer close(t.pendingReadPackets)
+	var buf [][]byte
+	for {
+		if len(buf) == 0 {
+			bs, ok := <-t.pendingReadPacketsInput
+			if !ok {
+				return
+			}
+			buf = append(buf, bs)
+			continue
+		} else {
+			select {
+			case bs, ok := <-t.pendingReadPacketsInput:
+				if !ok {
+					return
+				}
+				buf = append(buf, bs)
+			case t.pendingReadPackets <- buf[0]:
+				buf = buf[1:]
+			}
+		}
+	}
 }
 
 func newClientTransport(conn keyingTransport, clientVersion, serverVersion []byte, config *ClientConfig, dialAddr string, addr net.Addr) *handshakeTransport {
@@ -185,12 +215,40 @@ func (t *handshakeTransport) printPacket(p []byte, write bool) {
 	}
 }
 
-func (t *handshakeTransport) readPacket() ([]byte, error) {
+func (t *handshakeTransport) readPacketInternal() ([]byte, error) {
 	p, ok := <-t.incoming
 	if !ok {
 		return nil, t.readError
 	}
 	return p, nil
+}
+
+func (t *handshakeTransport) readPacketUnbufferedOfType(n byte) ([]byte, error) {
+	for {
+		b, err := t.readPacketInternal()
+		if err != nil {
+			return nil, err
+		}
+		if b[0] != n {
+			nb := make([]byte, len(b))
+			copy(nb, b)
+			t.pendingReadPacketsInput <- nb
+			continue
+		}
+		return b, nil
+	}
+}
+
+func (t *handshakeTransport) readPacket() ([]byte, error) {
+	select {
+	case p, ok := <-t.pendingReadPackets:
+		if !ok {
+			break
+		}
+		return p, nil
+	default:
+	}
+	return t.readPacketInternal()
 }
 
 func (t *handshakeTransport) readLoop() {
@@ -216,6 +274,8 @@ func (t *handshakeTransport) readLoop() {
 	close(t.startKex)
 
 	// Don't close t.requestKex; it's also written to from writePacket.
+
+	close(t.pendingReadPacketsInput)
 }
 
 func (t *handshakeTransport) pushPacket(p []byte) error {
